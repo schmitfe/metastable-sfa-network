@@ -5,5 +5,5 @@ The project explores how adaptation shapes metastable dynamics, transition stati
 
 ---
 
-## 📂 Repository Structure
+## Repository Structure
 
