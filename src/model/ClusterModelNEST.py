@@ -33,6 +33,14 @@ class ClusteredNetworkNEST(ClusterModelBase.ClusteredNetworkBase):
         self.RecordingDevices = []
         self.Currentsources = []
 
+    def _neuron_value(self, key, cell_type=None, default=None):
+        value = self.config['neuron'].get(key, default)
+        if isinstance(value, dict):
+            if cell_type is None:
+                return value
+            return value.get(cell_type, default)
+        return value
+
     def clean_network(self):
         """
         Creates empty attributes of a network.
@@ -48,200 +56,268 @@ class ClusteredNetworkNEST(ClusterModelBase.ClusteredNetworkBase):
         """
         nest.ResetKernel()
         nest.set_verbosity('M_WARNING')
-        nest.local_num_threads = self.params.get('n_jobs', 1)
-        nest.resolution = self.params.get('dt')
-        self.params['randseed'] = self.params.get('randseed', np.random.randint(1000000))
-        nest.rng_seed = self.params.get('randseed')
+        sim_cfg = self.config['simulation']
+        nest.local_num_threads = sim_cfg.get('n_jobs', 1)
+        nest.resolution = sim_cfg.get('dt')
+        if sim_cfg.get('randseed') is None:
+            sim_cfg['randseed'] = int(np.random.randint(1_000_000))
+        nest.rng_seed = sim_cfg['randseed']
         #nest.print_time = True
 
     def create_populations(self):
         """
         Creates Q excitatory and inhibitory neuron populations with the parameters of the network.
-
         """
-        # make sure number of clusters and units are compatible
-        assert self.params['N_E'] % self.params['Q'] == 0, 'N_E needs to be evenly divisible by Q'
-        assert self.params['N_I'] % self.params['Q'] == 0, 'N_I needs to be evenly divisible by Q'
+        network = self.config['network']
+        neuron_cfg = self.config['neuron']
+        stim_cfg = self.config.get('stimulation', {})
 
-        N = self.params['N_E'] + self.params['N_I']  # total units
-        try:
-            DistParams = self.params['DistParams']
-        except AttributeError:
-            DistParams = {'distribution': 'normal', 'sigma': 0.0, 'fraction': False}
+        n_exc = network['population']['excitatory']
+        n_inh = network['population']['inhibitory']
+        Q = network['clusters']['count']
+        assert n_exc % Q == 0, 'N_E needs to be evenly divisible by Q'
+        assert n_inh % Q == 0, 'N_I needs to be evenly divisible by Q'
 
-        if self.params['background_stim']=="DC":
+        total_units = n_exc + n_inh
+        background_mode = stim_cfg.get('background', 'DC')
 
-            if self.params['I_th_E'] is None:
-                I_xE = self.params['I_xE']
-            else:
-                I_xE = self.params['I_th_E'] * (self.params['V_th_E'] - self.params['E_L']) / self.params['tau_E'] * \
-                       self.params['C_m']
+        E_L = neuron_cfg['E_L']
+        C_m = neuron_cfg['C_m']
+        V_reset = neuron_cfg['V_reset']
+        t_ref = neuron_cfg['t_ref']
 
-            if self.params['I_th_I'] is None:
-                I_xI = self.params['I_xI']
-            else:
-                I_xI = self.params['I_th_I'] * (self.params['V_th_I'] - self.params['E_L']) / self.params['tau_I'] * \
-                       self.params['C_m']
+        tau_m_e = self._neuron_value('tau_m', 'excitatory')
+        tau_m_i = self._neuron_value('tau_m', 'inhibitory')
+        tau_syn_ex = self._neuron_value('tau_syn', 'excitatory')
+        tau_syn_in = self._neuron_value('tau_syn', 'inhibitory')
+
+        V_th_e = self._neuron_value('V_th', 'excitatory')
+        V_th_i = self._neuron_value('V_th', 'inhibitory')
+        I_e_e = self._neuron_value('I_e', 'excitatory', 0.0)
+        I_e_i = self._neuron_value('I_e', 'inhibitory', 0.0)
+        I_th_e = self._neuron_value('I_th', 'excitatory', None)
+        I_th_i = self._neuron_value('I_th', 'inhibitory', None)
+
+        if background_mode == "DC":
+            I_xE = (
+                I_e_e
+                if I_th_e is None
+                else I_th_e * (V_th_e - E_L) / tau_m_e * C_m
+            )
+            I_xI = (
+                I_e_i
+                if I_th_i is None
+                else I_th_i * (V_th_i - E_L) / tau_m_i * C_m
+            )
         else:
             I_xE = 0.0
             I_xI = 0.0
 
+        neuron_model = neuron_cfg['model']
+        is_gif = 'gif_psc_exp' in neuron_model
+        is_iaf = 'iaf_psc_exp' in neuron_model
+        delta_noise = neuron_cfg.get('delta')
+        rho_noise = neuron_cfg.get('rho')
+        def per_type(key, default=None):
+            base = self._neuron_value(key, default=default)
+            exc = self._neuron_value(key, 'excitatory', base)
+            inh = self._neuron_value(key, 'inhibitory', base)
+            return exc, inh
 
-        E_neuron_params = {'E_L': self.params['E_L'], 'C_m': self.params['C_m'], 'tau_m': self.params['tau_E'],
-                           't_ref': self.params['t_ref'], 'V_th': self.params['V_th_E'], 'V_reset': self.params['V_r'],
-                           'I_e': I_xE}
-        I_neuron_params = {'E_L': self.params['E_L'], 'C_m': self.params['C_m'], 'tau_m': self.params['tau_I'],
-                           't_ref': self.params['t_ref'], 'V_th': self.params['V_th_I'], 'V_reset': self.params['V_r'],
-                           'I_e': I_xI}
+        lambda_0_e, lambda_0_i = per_type('lambda_0', neuron_cfg.get('lambda_0'))
+        q_sfa_e, q_sfa_i = per_type('q_sfa', neuron_cfg.get('q_sfa'))
+        tau_sfa_e, tau_sfa_i = per_type('tau_sfa', neuron_cfg.get('tau_sfa'))
+        q_stc_e, q_stc_i = per_type('q_stc', neuron_cfg.get('q_stc'))
+        tau_stc_e, tau_stc_i = per_type('tau_stc', neuron_cfg.get('tau_stc'))
+        delta_v_e, delta_v_i = per_type('Delta_V', neuron_cfg.get('Delta_V'))
+        V_m_init = neuron_cfg.get('V_m', 'rand')
+        I_e_delta = self._neuron_value('I_e_delta', cell_type=None, default={'excitatory': 0.0, 'inhibitory': 0.0})
+        if not isinstance(I_e_delta, dict):
+            I_e_delta = {'excitatory': I_e_delta, 'inhibitory': I_e_delta}
 
-        if 'only_E_SFA' in self.params.keys():
+        only_E_SFA = self.config.get('only_E_SFA', False)
+
+        E_neuron_params = {
+            'E_L': E_L,
+            'C_m': C_m,
+            'tau_m': tau_m_e,
+            't_ref': t_ref,
+            'V_th': V_th_e,
+            'V_reset': V_reset,
+            'I_e': I_xE,
+        }
+        I_neuron_params = {
+            'E_L': E_L,
+            'C_m': C_m,
+            'tau_m': tau_m_i,
+            't_ref': t_ref,
+            'V_th': V_th_i,
+            'V_reset': V_reset,
+            'I_e': I_xI,
+        }
+
+        if only_E_SFA:
             I_neuron_type = 'iaf_psc_exp'
-            I_neuron_params['tau_syn_in'] = self.params['tau_syn_in']
-            I_neuron_params['tau_syn_ex'] = self.params['tau_syn_ex']
-            try:
-                if self.params['delta_'] is not None:
-                    I_neuron_params['delta'] = self.params['delta_']
-                if self.params['rho'] is not None:
-                    I_neuron_params['rho'] = self.params['rho']
-            except KeyError:
-                pass
-            if 'iaf_psc_exp' in self.params['neuron_type'] or 'gif_psc_exp' in self.params['neuron_type']:
-                E_neuron_params['tau_syn_ex'] = self.params['tau_syn_ex']
-                E_neuron_params['tau_syn_in'] = self.params['tau_syn_in']
-                # iaf_psc_exp allows stochasticity, if not used - ignore
-                try:
-                    if self.params['delta_'] is not None:
-                        E_neuron_params['delta'] = self.params['delta_']
-                    if self.params['rho'] is not None:
-                        E_neuron_params['rho'] = self.params['rho']
-                except KeyError:
-                    pass
-                if 'gif_psc_exp' in self.params['neuron_type']:
-                    # rename V_th to V_T_star
-                    E_neuron_params['V_T_star'] = E_neuron_params.pop('V_th')
-                    # use leak conductance g_L instead of time constant tau_m
-                    E_neuron_params['g_L'] = E_neuron_params['C_m'] / E_neuron_params.pop('tau_m')
+            I_neuron_params['tau_syn_in'] = tau_syn_in
+            I_neuron_params['tau_syn_ex'] = tau_syn_ex
+            if delta_noise is not None:
+                I_neuron_params['delta'] = delta_noise
+            if rho_noise is not None:
+                I_neuron_params['rho'] = rho_noise
 
-                    E_neuron_params['lambda_0'] = self.params['lambda_0']
-                    E_neuron_params['q_sfa'] = [self.params['q_sfa']]
-                    E_neuron_params['tau_sfa'] = [self.params['tau_sfa']]
-                    E_neuron_params['q_stc'] = [self.params['q_stc']]
-                    E_neuron_params['tau_stc'] = [self.params['tau_stc']]
-                    E_neuron_params['Delta_V'] = self.params['Delta_V']
-            else:
-                # only iaf_psc_exp and gif_psc_exp are implemented
-                assert ['iaf_psc_exp', 'gif_psc_exp'] in self.params[
-                    'neuron_type'], "only iaf_psc_exp and gif_psc_exp are implemented"
+            if is_iaf or is_gif:
+                E_neuron_params['tau_syn_ex'] = tau_syn_ex
+                E_neuron_params['tau_syn_in'] = tau_syn_in
+                if delta_noise is not None:
+                    E_neuron_params['delta'] = delta_noise
+                if rho_noise is not None:
+                    E_neuron_params['rho'] = rho_noise
+
+            if is_gif:
+                E_neuron_params['V_T_star'] = E_neuron_params.pop('V_th')
+                E_neuron_params['g_L'] = E_neuron_params['C_m'] / E_neuron_params.pop('tau_m')
+                if lambda_0_e is not None:
+                    E_neuron_params['lambda_0'] = lambda_0_e
+                if q_sfa_e is not None:
+                    E_neuron_params['q_sfa'] = [q_sfa_e]
+                if tau_sfa_e is not None:
+                    E_neuron_params['tau_sfa'] = [tau_sfa_e]
+                if q_stc_e is not None:
+                    E_neuron_params['q_stc'] = [q_stc_e]
+                if tau_stc_e is not None:
+                    E_neuron_params['tau_stc'] = [tau_stc_e]
+                if delta_v_e is not None:
+                    E_neuron_params['Delta_V'] = delta_v_e
         else:
-            I_neuron_type = self.params['neuron_type']
+            I_neuron_type = neuron_model
+            if is_iaf or is_gif:
+                E_neuron_params['tau_syn_ex'] = tau_syn_ex
+                E_neuron_params['tau_syn_in'] = tau_syn_in
+                I_neuron_params['tau_syn_in'] = tau_syn_in
+                I_neuron_params['tau_syn_ex'] = tau_syn_ex
+                if delta_noise is not None:
+                    E_neuron_params['delta'] = delta_noise
+                    I_neuron_params['delta'] = delta_noise
+                if rho_noise is not None:
+                    E_neuron_params['rho'] = rho_noise
+                    I_neuron_params['rho'] = rho_noise
+            if is_gif:
+                E_neuron_params['V_T_star'] = E_neuron_params.pop('V_th')
+                I_neuron_params['V_T_star'] = I_neuron_params.pop('V_th')
+                E_neuron_params['g_L'] = E_neuron_params['C_m'] / E_neuron_params.pop('tau_m')
+                I_neuron_params['g_L'] = I_neuron_params['C_m'] / I_neuron_params.pop('tau_m')
+                if lambda_0_e is not None:
+                    E_neuron_params['lambda_0'] = lambda_0_e
+                if lambda_0_i is not None:
+                    I_neuron_params['lambda_0'] = lambda_0_i
+                if q_sfa_e is not None:
+                    E_neuron_params['q_sfa'] = [q_sfa_e]
+                if q_sfa_i is not None:
+                    I_neuron_params['q_sfa'] = [q_sfa_i]
+                if tau_sfa_e is not None:
+                    E_neuron_params['tau_sfa'] = [tau_sfa_e]
+                if tau_sfa_i is not None:
+                    I_neuron_params['tau_sfa'] = [tau_sfa_i]
+                if q_stc_e is not None:
+                    E_neuron_params['q_stc'] = [q_stc_e]
+                if q_stc_i is not None:
+                    I_neuron_params['q_stc'] = [q_stc_i]
+                if tau_stc_e is not None:
+                    E_neuron_params['tau_stc'] = [tau_stc_e]
+                if tau_stc_i is not None:
+                    I_neuron_params['tau_stc'] = [tau_stc_i]
+                if delta_v_e is not None:
+                    E_neuron_params['Delta_V'] = delta_v_e
+                if delta_v_i is not None:
+                    I_neuron_params['Delta_V'] = delta_v_i
+        if not is_gif:
+            # restore tau_m values if no conversion happened
+            E_neuron_params.setdefault('tau_m', tau_m_e)
+            I_neuron_params.setdefault('tau_m', tau_m_i)
 
-            if 'iaf_psc_exp' in self.params['neuron_type'] or 'gif_psc_exp' in self.params['neuron_type']:
-                E_neuron_params['tau_syn_ex'] = self.params['tau_syn_ex']
-                E_neuron_params['tau_syn_in'] = self.params['tau_syn_in']
-                I_neuron_params['tau_syn_in'] = self.params['tau_syn_in']
-                I_neuron_params['tau_syn_ex'] = self.params['tau_syn_ex']
-
-                # iaf_psc_exp allows stochasticity, if not used - ignore
-                try:
-                    if self.params['delta_'] is not None:
-                        E_neuron_params['delta'] = self.params['delta_']
-                        I_neuron_params['delta'] = self.params['delta_']
-                    if self.params['rho'] is not None:
-                        E_neuron_params['rho'] = self.params['rho']
-                        I_neuron_params['rho'] = self.params['rho']
-                except KeyError:
-                    pass
-                if 'gif_psc_exp' in self.params['neuron_type']:
-                    #rename V_th to V_T_star
-                    E_neuron_params['V_T_star'] = E_neuron_params.pop('V_th')
-                    I_neuron_params['V_T_star'] = I_neuron_params.pop('V_th')
-                    #use leak conductance g_L instead of time constant tau_m
-                    E_neuron_params['g_L'] = E_neuron_params['C_m'] / E_neuron_params.pop('tau_m')
-                    I_neuron_params['g_L'] = I_neuron_params['C_m'] / I_neuron_params.pop('tau_m')
-
-                    E_neuron_params['lambda_0'] = self.params['lambda_0']
-                    E_neuron_params['q_sfa'] = [self.params['q_sfa']]
-                    E_neuron_params['tau_sfa'] = [self.params['tau_sfa']]
-                    E_neuron_params['q_stc'] = [self.params['q_stc']]
-                    E_neuron_params['tau_stc'] = [self.params['tau_stc']]
-                    E_neuron_params['Delta_V'] = self.params['Delta_V']
-
-                    I_neuron_params['lambda_0'] = self.params['lambda_0']
-                    I_neuron_params['q_sfa'] = [self.params['q_sfa']]
-                    I_neuron_params['tau_sfa'] = [self.params['tau_sfa']]
-                    I_neuron_params['q_stc'] = [self.params['q_stc']]
-                    I_neuron_params['tau_stc'] = [self.params['tau_stc']]
-                    I_neuron_params['V_T_star'] = self.params['V_th_I']
-                    I_neuron_params['Delta_V'] = self.params['Delta_V']
-            else:
-                # only iaf_psc_exp and gif_psc_exp are implemented
-                assert ['iaf_psc_exp', 'gif_psc_exp'] in self.params['neuron_type'], "only iaf_psc_exp and gif_psc_exp are implemented"
-
-            # create the neuron populations
+        # create the neuron populations
         E_pops = []
         I_pops = []
-        for q in range(self.params['Q']):
-            E_pops.append(nest.Create(self.params['neuron_type'], int(self.params['N_E'] / self.params['Q'])))
-            nest.SetStatus(E_pops[-1], E_neuron_params)
-        for q in range(self.params['Q']):
-            I_pops.append(nest.Create(I_neuron_type, int(self.params['N_I'] / self.params['Q'])))
-            nest.SetStatus(I_pops[-1], I_neuron_params)
+        for _ in range(Q):
+            E_pop = nest.Create(neuron_model, int(n_exc / Q))
+            nest.SetStatus(E_pop, E_neuron_params)
+            E_pops.append(E_pop)
+        for _ in range(Q):
+            I_pop = nest.Create(I_neuron_type, int(n_inh / Q))
+            nest.SetStatus(I_pop, I_neuron_params)
+            I_pops.append(I_pop)
 
-        if self.params['delta_I_xE'] > 0:
+        if I_e_delta.get('excitatory', 0.0) > 0:
+            delta_val = I_e_delta['excitatory']
             for E_pop in E_pops:
-                I_xEs = nest.GetStatus(E_pop, 'I_e')
+                currents = nest.GetStatus(E_pop, 'I_e')
                 nest.SetStatus(E_pop, [
-                    {'I_e': (1 - 0.5 * self.params['delta_I_xE'] + np.random.rand() * self.params['delta_I_xE']) * ixe}
-                    for ixe in I_xEs])
+                    {'I_e': (1 - 0.5 * delta_val + np.random.rand() * delta_val) * current}
+                    for current in currents
+                ])
 
-        if self.params['delta_I_xI'] > 0:
+        if I_e_delta.get('inhibitory', 0.0) > 0:
+            delta_val = I_e_delta['inhibitory']
             for I_pop in I_pops:
-                I_xIs = nest.GetStatus(I_pop, 'I_e')
+                currents = nest.GetStatus(I_pop, 'I_e')
                 nest.SetStatus(I_pop, [
-                    {'I_e': (1 - 0.5 * self.params['delta_I_xI'] + np.random.rand() * self.params['delta_I_xI']) * ixi}
-                    for ixi in I_xIs])
-        if self.params['V_m'] == 'rand':
-            T_0_E = self.params['t_ref'] + ClusterHelper.FPT(self.params['tau_E'], self.params['E_L'], I_xE,
-                                                             self.params['C_m'], self.params['V_th_E'],
-                                                             self.params['V_r'])
-            if np.isnan(T_0_E):
-                T_0_E = 10.
-            for E_pop in E_pops:
-                nest.SetStatus(E_pop, [{'V_m': ClusterHelper.V_FPT(self.params['tau_E'], self.params['E_L'], I_xE,
-                                                                   self.params['C_m'], T_0_E * np.random.rand(),
-                                                                   self.params['V_th_E'], self.params['t_ref'])} for i
-                                       in range(len(E_pop))])
+                    {'I_e': (1 - 0.5 * delta_val + np.random.rand() * delta_val) * current}
+                    for current in currents
+                ])
 
-            T_0_I = self.params['t_ref'] + ClusterHelper.FPT(self.params['tau_I'], self.params['E_L'], I_xI,
-                                                             self.params['C_m'], self.params['V_th_I'],
-                                                             self.params['V_r'])
+        if V_m_init == 'rand':
+            T_0_E = t_ref + ClusterHelper.FPT(tau_m_e, E_L, I_xE, C_m, V_th_e, V_reset)
+            if np.isnan(T_0_E):
+                T_0_E = 10.0
+            for E_pop in E_pops:
+                nest.SetStatus(E_pop, [
+                    {'V_m': ClusterHelper.V_FPT(tau_m_e, E_L, I_xE, C_m, T_0_E * np.random.rand(), V_th_e, t_ref)}
+                    for _ in range(len(E_pop))
+                ])
+
+            T_0_I = t_ref + ClusterHelper.FPT(tau_m_i, E_L, I_xI, C_m, V_th_i, V_reset)
             if np.isnan(T_0_I):
-                T_0_I = 10.
+                T_0_I = 10.0
             for I_pop in I_pops:
-                nest.SetStatus(I_pop, [{'V_m': ClusterHelper.V_FPT(self.params['tau_I'], self.params['E_L'], I_xI,
-                                                                   self.params['C_m'], T_0_I * np.random.rand(),
-                                                                   self.params['V_th_E'], self.params['t_ref'])} for i
-                                       in range(len(I_pop))])
+                nest.SetStatus(I_pop, [
+                    {'V_m': ClusterHelper.V_FPT(tau_m_i, E_L, I_xI, C_m, T_0_I * np.random.rand(), V_th_i, t_ref)}
+                    for _ in range(len(I_pop))
+                ])
         else:
-            nest.SetStatus(nest.NodeCollection([x for x in range(1, N + 1)]),
-                           [{'V_m': self.params['V_m']} for i in range(N)])
+            nest.SetStatus(
+                nest.NodeCollection(range(1, total_units + 1)),
+                [{'V_m': V_m_init} for _ in range(total_units)],
+            )
+
         self.Populations = [E_pops, I_pops]
 
     def create_connect_Poisson(self):
-        if self.params['background_stim'] == "DC":
+        stim_cfg = self.config.get('stimulation', {})
+        if stim_cfg.get('background', 'DC') == "DC":
             print("Use DC background stimulation.")
         else:
-            if self.params['I_th_E'] is None:
-                I_xE = self.params['I_xE']
-            else:
-                I_xE = self.params['I_th_E'] * (self.params['V_th_E'] - self.params['E_L']) / self.params['tau_E'] * \
-                       self.params['C_m']
+            neuron_cfg = self.config['neuron']
+            E_L = neuron_cfg['E_L']
+            C_m = neuron_cfg['C_m']
+            tau_m_e = self._neuron_value('tau_m', 'excitatory')
+            tau_m_i = self._neuron_value('tau_m', 'inhibitory')
+            V_th_e = self._neuron_value('V_th', 'excitatory')
+            V_th_i = self._neuron_value('V_th', 'inhibitory')
+            I_th_e = self._neuron_value('I_th', 'excitatory', None)
+            I_th_i = self._neuron_value('I_th', 'inhibitory', None)
+            I_e_e = self._neuron_value('I_e', 'excitatory', 0.0)
+            I_e_i = self._neuron_value('I_e', 'inhibitory', 0.0)
 
-            if self.params['I_th_I'] is None:
-                I_xI = self.params['I_xI']
-            else:
-                I_xI = self.params['I_th_I'] * (self.params['V_th_I'] - self.params['E_L']) / self.params['tau_I'] * \
-                       self.params['C_m']
+            I_xE = (
+                I_e_e
+                if I_th_e is None
+                else I_th_e * (V_th_e - E_L) / tau_m_e * C_m
+            )
+            I_xI = (
+                I_e_i
+                if I_th_i is None
+                else I_th_i * (V_th_i - E_L) / tau_m_i * C_m
+            )
 
             p_rate = 150
             # we target for an incoming rate of 100 spikes/s
@@ -249,10 +325,15 @@ class ClusteredNetworkNEST(ClusterModelBase.ClusteredNetworkBase):
             self.Populations.append([nest.Create("poisson_generator", params={"rate": p_rate})])
 
             #calculate average current for PSC with 1 pA
-            J_Poisson_E = 1000*I_xE/(self.params['tau_syn_ex'] * p_rate)
-            J_Poisson_I = 1000*I_xI/(self.params['tau_syn_ex'] * p_rate)
+            tau_syn_ex = self._neuron_value('tau_syn', 'excitatory')
+            J_Poisson_E = 1000 * I_xE / (tau_syn_ex * p_rate)
+            J_Poisson_I = 1000 * I_xI / (tau_syn_ex * p_rate)
 
-            delay = nest.random.uniform(min=min(self.params['delay']), max=max(self.params['delay']) if hasattr(self.params['delay'], '__len__') else self.params['delay'])
+            delay_cfg = self.config['network']['connectivity']['delay']
+            if isinstance(delay_cfg, (list, tuple)):
+                delay = nest.random.uniform(min=min(delay_cfg), max=max(delay_cfg))
+            else:
+                delay = delay_cfg
 
             nest.CopyModel("static_synapse", "noise_E", {"weight": J_Poisson_E, "delay": delay})
             nest.CopyModel("static_synapse", "noise_I", {"weight": J_Poisson_I, "delay": delay})
@@ -268,158 +349,167 @@ class ClusteredNetworkNEST(ClusterModelBase.ClusteredNetworkBase):
     def connect(self):
         """ Connects the excitatory and inhibitory populations with each other in the EI-clustered scheme
         """
-        #  self.Populations[0] -> Excitatory population
-        #  self.Populations[1] -> Inhibitory population
-        # connectivity parameters
-        js = self.params['js']  # connection weights
-        N = self.params['N_E'] + self.params['N_I']  # total units
-        if hasattr(self.params['delay'], '__len__'):
-            delay = nest.random.uniform(min=min(self.params['delay']), max=max(self.params['delay']))
-        else:
-            delay = self.params['delay']
-        # if js are not given compute them so that sqrt(K) spikes equal v_thr-E_L and rows are balanced
-        if np.isnan(js).any():
-            js = ClusterHelper.calc_js(self.params)
-        js *= self.params['s']
+        network = self.config['network']
+        neuron_cfg = self.config['neuron']
+        pop_cfg = network['population']
+        conn_cfg = network['connectivity']
+        weight_cfg = network['weights']
+        cluster_cfg = network['clusters']
 
-        # jminus is calculated so that row sums remain constant
-        if self.params['Q'] > 1:
-            jminus = (self.params['Q'] - self.params['jplus']) / float(self.params['Q'] - 1)
+        n_exc = pop_cfg['excitatory']
+        n_inh = pop_cfg['inhibitory']
+        total_units = n_exc + n_inh
+
+        ps = np.asarray(conn_cfg['probabilities'], dtype=float)
+        js = np.asarray(weight_cfg['matrix'], dtype=float)
+        scaling = weight_cfg.get('scale', 1.0)
+        modifiers = weight_cfg['modifiers']
+        ge = modifiers['ge']
+        gi = modifiers['gi']
+        gie = modifiers['gie']
+
+        q_count = cluster_cfg['count']
+        jplus = np.asarray(cluster_cfg['jplus'], dtype=float)
+
+        delay_cfg = conn_cfg['delay']
+        if isinstance(delay_cfg, (list, tuple)):
+            delay = nest.random.uniform(min=min(delay_cfg), max=max(delay_cfg))
         else:
-            self.params['jplus'] = np.ones((2, 2))
+            delay = delay_cfg
+
+        if np.isnan(js).any():
+            calc_params = {
+                'N_E': n_exc,
+                'N_I': n_inh,
+                'ps': ps,
+                'ge': ge,
+                'gi': gi,
+                'gie': gie,
+                'V_th_E': self._neuron_value('V_th', 'excitatory'),
+                'V_th_I': self._neuron_value('V_th', 'inhibitory'),
+                'tau_E': self._neuron_value('tau_m', 'excitatory'),
+                'tau_I': self._neuron_value('tau_m', 'inhibitory'),
+                'E_L': neuron_cfg['E_L'],
+                'neuron_type': neuron_cfg['model'],
+                'tau_syn_ex': self._neuron_value('tau_syn', 'excitatory'),
+                'tau_syn_in': self._neuron_value('tau_syn', 'inhibitory'),
+            }
+            js = ClusterHelper.calc_js(calc_params)
+        js = np.asarray(js, dtype=float) * scaling
+
+        if q_count > 1:
+            jminus = (q_count - jplus) / float(q_count - 1)
+        else:
+            jplus = np.ones((2, 2))
             jminus = np.ones((2, 2))
 
-        # define the synapses and connect the populations
-        # EE
-        j_ee = js[0, 0] / np.sqrt(N)
-        #nest.CopyModel("static_synapse", "EE_plus",
-        #               {"weight": self.params['jplus'][0, 0] * j_ee})#, "delay": delay})
-        #nest.CopyModel("static_synapse", "EE_minus", {"weight": jminus[0, 0] * j_ee}), "delay": delay})
-        if self.params['fixed_indegree']:
-            K_EE = int(self.params['ps'][0, 0] * self.params['N_E'] / self.params['Q'])
+        j_ee = js[0, 0] / np.sqrt(total_units)
+        if conn_cfg.get('fixed_indegree'):
+            K_EE = int(ps[0, 0] * n_exc / q_count)
             print('K_EE: ', K_EE)
             conn_params_EE = {'rule': 'fixed_indegree', 'indegree': K_EE, 'allow_autapses': False,
                               'allow_multapses': False}
-
         else:
-            conn_params_EE = {'rule': 'pairwise_bernoulli', 'p': self.params['ps'][0, 0], 'allow_autapses': False,
+            conn_params_EE = {'rule': 'pairwise_bernoulli', 'p': ps[0, 0], 'allow_autapses': False,
                               'allow_multapses': False}
         for i, pre in enumerate(self.Populations[0]):
             for j, post in enumerate(self.Populations[0]):
-                if i == j:
-                    # same cluster
-                    nest.Connect(pre, post, conn_params_EE,
-                                 syn_spec={"weight": self.params['jplus'][0, 0] * j_ee, 'delay': delay})
-                else:
-                    nest.Connect(pre, post, conn_params_EE,
-                                 syn_spec={"weight": jminus[0, 0] * j_ee, "delay": delay})
+                weight = jplus[0, 0] if i == j else jminus[0, 0]
+                nest.Connect(pre, post, conn_params_EE,
+                             syn_spec={"weight": weight * j_ee, "delay": delay})
 
-        # EI
-        j_ei = js[0, 1] / np.sqrt(N)
-        #nest.CopyModel("static_synapse", "EI_plus",
-        #               {"weight": j_ei * self.params['jplus'][0, 1], "delay": delay})
-        #nest.CopyModel("static_synapse", "EI_minus", {"weight": j_ei * jminus[0, 1], "delay": delay})
-        if self.params['fixed_indegree']:
-            K_EI = int(self.params['ps'][0, 1] * self.params['N_I'] / self.params['Q'])
+        j_ei = js[0, 1] / np.sqrt(total_units)
+        if conn_cfg.get('fixed_indegree'):
+            K_EI = int(ps[0, 1] * n_inh / q_count)
             print('K_EI: ', K_EI)
             conn_params_EI = {'rule': 'fixed_indegree', 'indegree': K_EI, 'allow_autapses': False,
                               'allow_multapses': False}
         else:
-            conn_params_EI = {'rule': 'pairwise_bernoulli', 'p': self.params['ps'][0, 1], 'allow_autapses': False,
+            conn_params_EI = {'rule': 'pairwise_bernoulli', 'p': ps[0, 1], 'allow_autapses': False,
                               'allow_multapses': False}
         for i, pre in enumerate(self.Populations[1]):
             for j, post in enumerate(self.Populations[0]):
-                if i == j:
-                    # same cluster
-                    nest.Connect(pre, post, conn_params_EI,
-                                 syn_spec={"weight": j_ei * self.params['jplus'][0, 1], "delay": delay})
-                else:
-                    nest.Connect(pre, post, conn_params_EI,
-                                 syn_spec={"weight": j_ei * jminus[0, 1], "delay": delay})
-        # IE
-        j_ie = js[1, 0] / np.sqrt(N)
-        #nest.CopyModel("static_synapse", "IE_plus",
-        #               {"weight": j_ie * self.params['jplus'][1, 0], "delay": delay})
-        #nest.CopyModel("static_synapse", "IE_minus", {"weight": j_ie * jminus[1, 0], "delay": delay})
+                weight = jplus[0, 1] if i == j else jminus[0, 1]
+                nest.Connect(pre, post, conn_params_EI,
+                             syn_spec={"weight": weight * j_ei, "delay": delay})
 
-        if self.params['fixed_indegree']:
-            K_IE = int(self.params['ps'][1, 0] * self.params['N_E'] / self.params['Q'])
+        j_ie = js[1, 0] / np.sqrt(total_units)
+        if conn_cfg.get('fixed_indegree'):
+            K_IE = int(ps[1, 0] * n_exc / q_count)
             print('K_IE: ', K_IE)
             conn_params_IE = {'rule': 'fixed_indegree', 'indegree': K_IE, 'allow_autapses': False,
                               'allow_multapses': False}
         else:
-            conn_params_IE = {'rule': 'pairwise_bernoulli', 'p': self.params['ps'][1, 0], 'allow_autapses': False,
+            conn_params_IE = {'rule': 'pairwise_bernoulli', 'p': ps[1, 0], 'allow_autapses': False,
                               'allow_multapses': False}
         for i, pre in enumerate(self.Populations[0]):
             for j, post in enumerate(self.Populations[1]):
-                if i == j:
-                    # same cluster
-                    nest.Connect(pre, post, conn_params_IE,
-                                 syn_spec={"weight": j_ie * self.params['jplus'][1, 0], "delay": delay})
-                else:
-                    nest.Connect(pre, post, conn_params_IE,
-                                 syn_spec={"weight": j_ie * jminus[1, 0], "delay": delay})
+                weight = jplus[1, 0] if i == j else jminus[1, 0]
+                nest.Connect(pre, post, conn_params_IE,
+                             syn_spec={"weight": weight * j_ie, "delay": delay})
 
-        # II
-        j_ii = js[1, 1] / np.sqrt(N)
-        #nest.CopyModel("static_synapse", "II_plus",
-        #               {"weight": j_ii * self.params['jplus'][1, 1], "delay": delay})
-        #nest.CopyModel("static_synapse", "II_minus", {"weight": j_ii * jminus[1, 1], "delay": delay})
-        if self.params['fixed_indegree']:
-            K_II = int(self.params['ps'][1, 1] * self.params['N_I'] / self.params['Q'])
+        j_ii = js[1, 1] / np.sqrt(total_units)
+        if conn_cfg.get('fixed_indegree'):
+            K_II = int(ps[1, 1] * n_inh / q_count)
             print('K_II: ', K_II)
             conn_params_II = {'rule': 'fixed_indegree', 'indegree': K_II, 'allow_autapses': False,
                               'allow_multapses': False}
         else:
-            conn_params_II = {'rule': 'pairwise_bernoulli', 'p': self.params['ps'][1, 1], 'allow_autapses': False,
+            conn_params_II = {'rule': 'pairwise_bernoulli', 'p': ps[1, 1], 'allow_autapses': False,
                               'allow_multapses': False}
         for i, pre in enumerate(self.Populations[1]):
             for j, post in enumerate(self.Populations[1]):
-                if i == j:
-                    # same cluster
-                    nest.Connect(pre, post, conn_params_II,
-                                 syn_spec={"weight": j_ii * self.params['jplus'][1, 1], "delay": delay})
-                else:
-                    nest.Connect(pre, post, conn_params_II,
-                                 syn_spec={"weight": j_ii * jminus[1, 1], "delay": delay})
-        #print('Js: ', js / np.sqrt(N))
+                weight = jplus[1, 1] if i == j else jminus[1, 1]
+                nest.Connect(pre, post, conn_params_II,
+                             syn_spec={"weight": weight * j_ii, "delay": delay})
 
     def create_stimulation(self):
         """
         Creates a current source as stimulation of the specified cluster/s.
         """
-        if self.params['stim_clusters'] is not None:
-            stim_amp = self.params['stim_amp']  # amplitude of the stimulation current in pA
-            stim_starts = self.params['stim_starts']  # list of stimulation start times
-            stim_ends = self.params['stim_ends']  # list of stimulation end times
+        stim_cfg = self.config.get('stimulation', {})
+        warmup = self.config['simulation']['warmup']
+        self.Currentsources = []
+        clusters = stim_cfg.get('clusters')
+        multi_cfg = stim_cfg.get('multi', {})
+
+        if clusters:
+            stim_amp = stim_cfg.get('amplitude', 0.0)
+            stim_starts = stim_cfg.get('starts', [])
+            stim_ends = stim_cfg.get('ends', [])
             amplitude_values = []
             amplitude_times = []
             for start, end in zip(stim_starts, stim_ends):
-                amplitude_times.append(start + self.params['warmup'])
+                amplitude_times.append(start + warmup)
                 amplitude_values.append(stim_amp)
-                amplitude_times.append(end + self.params['warmup'])
+                amplitude_times.append(end + warmup)
                 amplitude_values.append(0.)
             self.Currentsources = [nest.Create('step_current_generator')]
-            for stim_cluster in self.params['stim_clusters']:
+            for stim_cluster in clusters:
                 nest.Connect(self.Currentsources[0], self.Populations[0][stim_cluster])
             nest.SetStatus(self.Currentsources[0],
                            {'amplitude_times': amplitude_times, 'amplitude_values': amplitude_values})
 
-        elif self.params['multi_stim_clusters'] is not None:
+        elif multi_cfg and multi_cfg.get('clusters') is not None:
             print('stimulating multi stim ...')
-            for stim_clusters, amplitudes, times in zip(self.params['multi_stim_clusters'],
-                                                        self.params['multi_stim_amps'],
-                                                        self.params['multi_stim_times']):
+            clusters_list = multi_cfg.get('clusters', [])
+            amps_list = multi_cfg.get('amps', [])
+            times_list = multi_cfg.get('times', [])
+            delays = multi_cfg.get('delay')
+            if delays is not None and not isinstance(delays, (list, tuple)):
+                delays = [delays]
+
+            for stim_clusters, amplitudes, times in zip(clusters_list, amps_list, times_list):
                 self.Currentsources.append(nest.Create('step_current_generator'))
-                nest.SetStatus(self.Currentsources[-1], {'amplitude_times': times[1:] + self.params['warmup'],
+                warm_times = [t + warmup for t in times[1:]]
+                nest.SetStatus(self.Currentsources[-1], {'amplitude_times': warm_times,
                                                          'amplitude_values': amplitudes[1:]})
                 stim_units = []
-                if 'stim_clusters_delay' in self.params:
-                    if len(self.params['stim_clusters_delay']) == 1:
-                        syn_dict = {"delay": nest.random.uniform(min=0.1, max=self.params['stim_clusters_delay'][0])}
+                if delays:
+                    if len(delays) == 1:
+                        syn_dict = {"delay": nest.random.uniform(min=0.1, max=delays[0])}
                     else:
-                        syn_dict = {"delay": nest.random.uniform(min=self.params['stim_clusters_delay'][0],
-                                                                 max=self.params['stim_clusters_delay'][1])}
+                        syn_dict = {"delay": nest.random.uniform(min=delays[0], max=delays[1])}
                 else:
                     syn_dict = {}
                 for stim_cluster in stim_clusters:
@@ -458,7 +548,8 @@ class ClusteredNetworkNEST(ClusterModelBase.ClusteredNetworkBase):
         """
         Simulates network for a period of warmup+simtime
         """
-        nest.Simulate(self.params['warmup'] + self.params['simtime'])
+        sim_cfg = self.config['simulation']
+        nest.Simulate(sim_cfg['warmup'] + sim_cfg['duration'])
 
     def get_recordings(self):
         """
@@ -474,8 +565,9 @@ class ClusteredNetworkNEST(ClusterModelBase.ClusteredNetworkBase):
         spiketimes = np.append(events['times'][None, :], events['senders'][None, :], axis=0)
         spiketimes[1] -= 1
         # remove the pre warmup spikes
-        spiketimes = spiketimes[:, spiketimes[0] >= self.params['warmup']]
-        spiketimes[0] -= self.params['warmup']
+        warmup = self.config['simulation']['warmup']
+        spiketimes = spiketimes[:, spiketimes[0] >= warmup]
+        spiketimes[0] -= warmup
         return spiketimes
 
     def get_parameter(self):
@@ -483,7 +575,7 @@ class ClusteredNetworkNEST(ClusterModelBase.ClusteredNetworkBase):
         Return:
             parameters (dict): Dictionary with all parameters for the simulation / network creation.
         """
-        return self.params
+        return self.config
 
     def create_and_simulate(self):
         """
@@ -499,310 +591,24 @@ class ClusteredNetworkNEST(ClusterModelBase.ClusteredNetworkBase):
         return self.get_recordings()
 
 
-class ClusteredNetworkNEST_Timing(ClusteredNetworkNEST):
-    """
-    Adds to EI clustered network:
-        Measurement of runtime (attribute Timing)
-        Changeable ModelBuildPipeline (list of functions)
-        Firing rate estimation of exc. and inh. neurons
-        Functions to save connectivity and create connectivity from file
-    """
-
-    def __init__(self, defaultValues, parameters):
-        """
-        Creates an object with functions to create neuron populations,
-        stimulation devices and recording devices for an EI-clustered network.
-        Initializes the object. Creates the attributes Populations, RecordingDevices and
-        Currentsources to be filled during network construction.
-        Attribute params contains all parameters used to construct network. ClusteredNetworkNEST_Timing objects
-        measure the timing of the simulation and offer more functions than the base class.
-        Parameters:
-            defaultValues (module): A Module which contains the default configuration
-            parameters (dict):      Dictionary with parameters which should be modified from their default values
-        """
-        super().__init__(defaultValues, parameters)
-        self.Timing = {}
-        self.ModelBuildPipeline = [self.setup_nest, self.create_populations, self.create_stimulation,
-                                   self.create_recording_devices, self.connect]
-
-    def clean_network(self):
-        super().clean_network()
-        self.Timing = {}
-
-    def setup_network(self):
-        """
-        Initializes NEST and creates the network in NEST, ready to be simulated.
-        Functions saved in ModelBuildPipeline are executed.
-        nest.Prepare is executed in this function.
-        """
-        startbuild = time.time()
-        for func in self.ModelBuildPipeline:
-            func()
-        endbuild = time.time()
-        endcompile = time.time()
-        nest.Prepare()
-        endLoad = time.time()
-        self.Timing['Build'] = endbuild - startbuild
-        self.Timing['Compile'] = 0.0
-        self.Timing['Load'] = endLoad - endcompile
-
-    def set_model_build_pipeline(self, Pipeline):
-        """
-        Sets the ModelBuildPipeline.
-        Parameters:
-            Pipeline (list of functions):   ordered list of functions executed to build the network model
-        """
-        self.ModelBuildPipeline = Pipeline
-
-    def simulate(self):
-        startsimulate = time.time()
-        super().simulate()
-        endsimulate = time.time()
-        self.Timing['Sim'] = endsimulate - startsimulate
-
-    def get_recordings(self):
-        startPullSpikes = time.time()
-        spiketimes = super().get_recordings()
-        endPullSpikes = time.time()
-        self.Timing['Download'] = endPullSpikes - startPullSpikes
-        return spiketimes
-
-    def set_I_x(self, I_XE, I_XI):
-        """
-        Adds DC currents for the excitatory and inhibitory neurons. Allows also the usage of a baseline defined by the
-        model setup.
-        """
-        for E_pop in self.Populations[0]:
-            I_e_loc = E_pop.get('I_e')
-            E_pop.set({'I_e': I_e_loc + I_XE})
-        for I_pop in self.Populations[1]:
-            I_e_loc = I_pop.get('I_e')
-            I_pop.set({'I_e': I_e_loc + I_XI})
-
-    def get_timing(self):
-        """
-        Gets Timing information of simulation.
-        Returns:
-            Dictionary with the timing information of the different simulation phases in seconds.
-        """
-        return self.Timing
-
-    def get_simulation(self, PathSpikes=None, timeout=None):
-        """
-        Creates the network, simulates it and extracts the firing rates. If PathSpikes is supplied the spikes get saved
-        to a pickle file. If a timeout is supplied, a timeout handler is created which stops the execution.
-        Parameters:
-            PathSpikes: (optional) Path of file for spiketimes
-            timeout: (optional) Time of timeout in seconds
-        Returns:
-            Dictionary with firing rates, timing information (dict) and parameters (dict)
-        """
-        if timeout is not None:
-            # Change the behavior of SIGALRM
-            signal.signal(signal.SIGALRM, GeneralHelper.timeout_handler)
-            signal.alarm(timeout)
-            # This try/except loop ensures that 
-            #   you'll catch TimeoutException when it's sent.
-        try:
-            self.setup_network()
-            self.simulate()
-            spiketimes = self.get_recordings()
-            e_rate, i_rate = super().get_firing_rates(spiketimes)
-
-            if PathSpikes is not None:
-                with open(PathSpikes, 'wb') as outfile:
-                    pickle.dump(spiketimes, outfile)
-
-            nest.Cleanup()
-            return {'e_rate': e_rate, 'i_rate': i_rate, 'Timing': self.get_timing(), 'params': self.get_parameter(),
-                    'spiketimes': spiketimes}
-
-        except GeneralHelper.TimeoutException:
-            print("Aborted - Timeout")
-            return {'e_rate': -1, 'i_rate': -1, 'Timing': self.get_timing(), 'params': self.get_parameter(),
-                    'spiketimes': [[], []]}
-
-    def connect_from_file(self, Filename):
-        """
-        Connects the network from saved connectivity.
-        Parameters:
-              Filename (str or filedescriptor): Path to file with saved connectivity to be loaded.
-        """
-
-        assert nest.NumProcesses() == 1, "Cannot load MPI parallel"
-        assert hasattr(self.params["delay"], '__len__')
-
-        with open(Filename, "rb") as f:
-            network = pickle.load(f)
-        assert network["n_vp"] == nest.total_num_virtual_procs, "N_VP must match"
-
-        ###############################################################################
-        # Reconstruct connectivity
-        # EE
-        nest.CopyModel("static_synapse", "EE_plus", {"delay": self.params['delay']})
-        nest.CopyModel("static_synapse", "EE_minus", {"delay": self.params['delay']})
-
-        nest.Connect(network["EE_plus"].source.values, network["EE_plus"].target.values,
-                     "one_to_one",
-                     {"synapse_model": "EE_plus", "weight": network["EE_plus"].weight.values})
-        nest.Connect(network["EE_minus"].source.values, network["EE_minus"].target.values,
-                     "one_to_one",
-                     {"synapse_model": "EE_minus", "weight": network["EE_minus"].weight.values})
-
-        # EI
-        nest.CopyModel("static_synapse", "EI_plus", {"delay": self.params['delay']})
-        nest.CopyModel("static_synapse", "EI_minus", {"delay": self.params['delay']})
-
-        nest.Connect(network["EI_plus"].source.values, network["EI_plus"].target.values,
-                     "one_to_one",
-                     {"synapse_model": "EI_plus", "weight": network["EI_plus"].weight.values})
-        nest.Connect(network["EI_minus"].source.values, network["EI_minus"].target.values,
-                     "one_to_one",
-                     {"synapse_model": "EI_minus", "weight": network["EI_minus"].weight.values})
-
-        # IE
-        nest.CopyModel("static_synapse", "IE_plus", {"delay": self.params['delay']})
-        nest.CopyModel("static_synapse", "IE_minus", {"delay": self.params['delay']})
-
-        nest.Connect(network["IE_plus"].source.values, network["IE_plus"].target.values,
-                     "one_to_one",
-                     {"synapse_model": "IE_plus", "weight": network["IE_plus"].weight.values})
-        nest.Connect(network["IE_minus"].source.values, network["IE_minus"].target.values,
-                     "one_to_one",
-                     {"synapse_model": "IE_minus", "weight": network["IE_minus"].weight.values})
-
-        # II
-        nest.CopyModel("static_synapse", "II_plus", {"delay": self.params['delay']})
-        nest.CopyModel("static_synapse", "II_minus", {"delay": self.params['delay']})
-
-        nest.Connect(network["II_plus"].source.values, network["II_plus"].target.values,
-                     "one_to_one",
-                     {"synapse_model": "II_plus", "weight": network["II_plus"].weight.values})
-        nest.Connect(network["II_minus"].source.values, network["II_minus"].target.values,
-                     "one_to_one",
-                     {"synapse_model": "II_minus", "weight": network["II_minus"].weight.values})
-
-    @staticmethod
-    def save_conn_to_file(Filename):
-        """
-        Saves the network connectivity of the E and I populations to file.
-        Parameters:
-              Filename (str or filedescriptor): Filepath to store connectivity.
-        """
-        assert nest.NumProcesses() == 1, "Cannot dump MPI parallel"
-        import pickle
-        print("Save Conn to File")
-        network = {"n_vp": nest.total_num_virtual_procs,
-                   "EE_plus": nest.GetConnections(synapse_model="EE_plus").get(
-                       ("source", "target", "weight"), output="pandas"),
-                   "EE_minus": nest.GetConnections(synapse_model="EE_minus").get(
-                       ("source", "target", "weight"), output="pandas"),
-                   "EI_plus": nest.GetConnections(synapse_model="EI_plus").get(
-                       ("source", "target", "weight"), output="pandas"),
-                   "EI_minus": nest.GetConnections(synapse_model="EI_minus").get(
-                       ("source", "target", "weight"), output="pandas"),
-                   "IE_plus": nest.GetConnections(synapse_model="IE_plus").get(
-                       ("source", "target", "weight"), output="pandas"),
-                   "IE_minus": nest.GetConnections(synapse_model="IE_minus").get(
-                       ("source", "target", "weight"), output="pandas"),
-                   "II_plus": nest.GetConnections(synapse_model="II_plus").get(
-                       ("source", "target", "weight"), output="pandas"),
-                   "II_minus": nest.GetConnections(synapse_model="II_minus").get(
-                       ("source", "target", "weight"), output="pandas")}
-        print("Save Conn to File Collection done")
-        with open(Filename, "wb") as f:
-            pickle.dump(network, f, pickle.HIGHEST_PROTOCOL)
-
-
-    def save_conn_to_file2(self, Filename):
-        """
-        Saves the network connectivity of the E and I populations to file.
-        Splits connections into subgroups for each cluster-cluster group.
-        Should be able to save very large networks.
-        Parameters:
-              Filename (str or filedescriptor): Filepath to store connectivity.
-        """
-        assert nest.NumProcesses() == 1, "Cannot dump MPI parallel"
-        PopulationList=self.Populations[0]+self.Populations[1]
-        with open(Filename, "wb") as f:
-            pickle.dump({"n_vp": nest.total_num_virtual_procs}, f, pickle.HIGHEST_PROTOCOL)
-            # iterate over all populations
-            for ii in range(len(PopulationList)):
-                for jj in range(len(PopulationList)):
-                    #print(ii,jj)
-                    # get connections between populations ii and jj
-                    Conns=nest.GetConnections(source=PopulationList[jj], target=PopulationList[ii])
-                    pickle.dump({str(ii)+";"+str(jj): Conns.get(
-                        ("source", "target", "weight", "synapse_model"), output='pandas')}, f, pickle.HIGHEST_PROTOCOL)
-
-    def connect_from_file2(self, Filename):
-        """
-        Connects the E and I populations from file saved with save_conn_to_file2.
-        """
-        with open(Filename, "rb") as f:
-            data = pickle.load(f)
-            assert data["n_vp"] == nest.total_num_virtual_procs, "N_VP must match"
-            print("Load Conn from File")
-            PopulationList = self.Populations[0] + self.Populations[1]
-            # load all data from pickle file
-            # EE
-            nest.CopyModel("static_synapse", "EE_plus", {"delay": self.params['delay']})
-            nest.CopyModel("static_synapse", "EE_minus", {"delay": self.params['delay']})
-
-            # EI
-            nest.CopyModel("static_synapse", "EI_plus", {"delay": self.params['delay']})
-            nest.CopyModel("static_synapse", "EI_minus", {"delay": self.params['delay']})
-
-            # IE
-            nest.CopyModel("static_synapse", "IE_plus", {"delay": self.params['delay']})
-            nest.CopyModel("static_synapse", "IE_minus", {"delay": self.params['delay']})
-
-            # II
-            nest.CopyModel("static_synapse", "II_plus", {"delay": self.params['delay']})
-            nest.CopyModel("static_synapse", "II_minus", {"delay": self.params['delay']})
-
-            while True:
-                try:
-                    ConnData = pickle.load(f)
-                except EOFError:
-                    break
-                # extract keys from ConnData and split them into sourcegroup and targetgroup - can be used to check
-                key = list(ConnData.keys())[0]
-                nest.Connect(ConnData[key].source.values, ConnData[key].target.values, "one_to_one",
-                    {"synapse_model": ConnData[key].synapse_model.values[0], "weight": ConnData[key].weight.values})
-
 if __name__ == "__main__":
     from config import load_config
     import matplotlib.pyplot as plt
 
     default = load_config()
+    overrides = {
+        'simulation': {'n_jobs': 4, 'warmup': 500.0, 'duration': 1200.0},
+        'stimulation': {
+            'clusters': [3],
+            'amplitude': 2.0,
+            'starts': [600.0],
+            'ends': [1000.0],
+        },
+    }
 
-    EI_cluster = ClusteredNetworkNEST(default, {'n_jobs': 4, 'warmup': 500, 'simtime': 1200, 'stim_clusters': [3],
-                                                'stim_amp': 2.0, 'stim_starts': [600.], 'stim_ends': [1000.]})
+    EI_cluster = ClusteredNetworkNEST(default, overrides)
     spikes = EI_cluster.create_and_simulate()
     print(EI_cluster.get_parameter())
     plt.figure()
-    plt.plot(spikes[0,:], spikes[1,:], '.')
+    plt.plot(spikes[0, :], spikes[1, :], '.')
     plt.savefig('NEST.png')
-
-
-    # Creates one network, simulates it and than saves the connectivity. The saved connectivity is than used in
-    # anothr network. The lambda: np.random.seed(42) is used before create_populations to use the same set of
-    # membrane potentials in both networks. The results should be identically
-    np.random.seed(42)
-    Cluster2 = ClusteredNetworkNEST_Timing(default,
-                                           {'n_jobs': 4, 'warmup': 500, 'simtime': 1200, 'stim_clusters': [3], 'stim_amp': 2.0,
-                                 'stim_starts': [600.], 'stim_ends': [1000.]})
-    Cluster2.set_model_build_pipeline([Cluster2.setup_nest, lambda: np.random.seed(42),Cluster2.create_populations, Cluster2.create_stimulation,
-                                       Cluster2.create_recording_devices, lambda: np.random.seed(42),
-                                       Cluster2.connect])
-    print(Cluster2.get_simulation())
-    Cluster2.save_conn_to_file2("Cluster2.pkl")
-    Cluster3 = ClusteredNetworkNEST_Timing(default,
-                                           {'n_jobs': 4, 'warmup': 500, 'simtime': 1200, 'stim_clusters': [3], 'stim_amp': 2.0,
-                                 'stim_starts': [600.], 'stim_ends': [1000.]})
-    np.random.seed(45)
-    Cluster3.set_model_build_pipeline([Cluster3.setup_nest, lambda: np.random.seed(42),Cluster3.create_populations, Cluster3.create_stimulation,
-                                       Cluster3.create_recording_devices, lambda: np.random.seed(45),
-                                       lambda: Cluster3.connect_from_file2("Cluster2.pkl")])
-    print(Cluster3.get_simulation())

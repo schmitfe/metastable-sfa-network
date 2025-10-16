@@ -397,7 +397,8 @@ def run_trials_protocol_mixed(
       changes belonging to that trial. CTRL_PRE trials can thus be longer than
       others; analysis windows remain relative to `trial_start`.
     """
-    Q = int(EI_Network.params["Q"])  # number of clusters
+    config = EI_Network.get_parameter()
+    Q = int(config['network']['clusters']['count'])  # number of clusters
     rng = rng or np.random.default_rng()
 
     # Build pseudo-random order
@@ -996,29 +997,33 @@ if __name__ == "__main__":
 
     # compute inhibitory weight
     jip = 1.0 + (jep - 1.0) * jip_ratio
-
-    params = {
-        "n_jobs": CPUcount,
-        "N_E": N_E,
-        "N_I": N_I,
-        "dt": 0.1,
-        "neuron_type": "gif_psc_exp",
-        "Q": 10,
-        "jplus": np.array([[jep, jip], [jip, jip]]),
-        "I_th_E": I_th_E,
-        "I_th_I": I_th_I,
-        "warmup": float(WARMUP_MS),
-        "tau_stc": tau_stc,
-        "q_stc": q_stc,
-        "randseed": randseed,
-        "only_E_SFA": True,
-        "background_stim": "DC",
-        "multi_stim_clusters": None,
+    overrides = {
+        'simulation': {
+            'n_jobs': CPUcount,
+            'dt': 0.1,
+            'warmup': float(WARMUP_MS),
+            'duration': float(WARMUP_MS),
+            'randseed': randseed,
+        },
+        'network': {
+            'population': {'excitatory': N_E, 'inhibitory': N_I},
+            'clusters': {'count': 10, 'jplus': [[float(jep), float(jip)], [float(jip), float(jip)]]},
+        },
+        'neuron': {
+            'model': 'gif_psc_exp',
+            'I_th': {'excitatory': float(I_th_E), 'inhibitory': float(I_th_I)},
+            'tau_stc': float(tau_stc),
+            'q_stc': float(q_stc),
+        },
+        'stimulation': {'background': 'DC'},
+        'only_E_SFA': True,
     }
 
     # ------------------- RUN MIXED (ATTN + CTRL + CTRL_PRE) -------------------
-    EI = ClusterModelNEST.ClusteredNetworkNEST(default, params)
+    EI = ClusterModelNEST.ClusteredNetworkNEST(default, overrides)
     EI.setup_network()
+    cfg = EI.get_parameter()
+    Q = cfg['network']['clusters']['count']
 
     rng = np.random.default_rng(randseed)
     q_sched, trials = run_trials_protocol_mixed(
@@ -1044,7 +1049,7 @@ if __name__ == "__main__":
 
     spk_times, spk_ids = EI.get_recordings()
     t_bins, rates, dom = bin_cluster_rates(
-        np.array(spk_times), np.array(spk_ids), N_E=N_E, Q=params["Q"], bin_ms=BIN_MS
+        np.array(spk_times), np.array(spk_ids), N_E=N_E, Q=Q, bin_ms=BIN_MS
     )
     pred, succ = dominant_and_success_over_window(
         t_bins, rates, trials,
@@ -1130,7 +1135,7 @@ if __name__ == "__main__":
             iA,
             iC,
             iP,
-            Q=params["Q"],
+            Q=Q,
             check_win_start_ms=CHECK_WIN_START_MS,
             check_win_end_ms=CHECK_WIN_END_MS,
             raster_stride=RASTER_STRIDE,
@@ -1150,7 +1155,7 @@ if __name__ == "__main__":
             [TrialSpec(**d) for d in results["trials"]],
             pred,
             succ,
-            Q=params["Q"],
+            Q=Q,
             check_win_start_ms=CHECK_WIN_START_MS,
             check_win_end_ms=CHECK_WIN_END_MS,
             bin_ms=BIN_MS,

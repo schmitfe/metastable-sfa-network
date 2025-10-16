@@ -168,25 +168,48 @@ if __name__ == '__main__':
         pass
 
 
-    params= {'n_jobs': CPUcount, 'N_E': N_E, 'N_I': N_I, 'dt': 0.1, 'neuron_type': 'gif_psc_exp', 'Q': 10,
-             'jplus': np.array([[jep, jip], [jip, jip]]), 'I_th_E': I_th_E, 'I_th_I': I_th_I, 'warmup': 5000.,
-             'tau_stc': tau_stc, 'q_stc': q_stc, 'randseed': randseed, 'only_E_SFA': True, 'background_stim': "DC",
-             'multi_stim_clusters': None}
-
     prerun = 25000
-    params['simtime'] = 120000 + 2*prerun
-    print(params)
+    sim_duration = 120000 + 2 * prerun
+    overrides = {
+        'simulation': {
+            'n_jobs': CPUcount,
+            'dt': 0.1,
+            'warmup': 5000.0,
+            'duration': float(sim_duration),
+            'randseed': randseed,
+        },
+        'network': {
+            'population': {'excitatory': N_E, 'inhibitory': N_I},
+            'clusters': {'count': 10, 'jplus': [[float(jep), float(jip)], [float(jip), float(jip)]]},
+        },
+        'neuron': {
+            'model': 'gif_psc_exp',
+            'I_th': {'excitatory': float(I_th_E), 'inhibitory': float(I_th_I)},
+            'tau_stc': float(tau_stc),
+            'q_stc': float(q_stc),
+        },
+        'stimulation': {'background': 'DC'},
+        'only_E_SFA': True,
+    }
 
-    EI_Network = ClusterModelNEST.ClusteredNetworkNEST(default, params)
+    EI_Network = ClusterModelNEST.ClusteredNetworkNEST(default, overrides)
     EI_Network.setup_network()
+    cfg = EI_Network.get_parameter()
 
     values_q = [q_stc * (1 - i / 5) for i in range(4)]
-    times_q = [i * (params['simtime'] - 2*prerun) // 5 + (prerun if i > 0 else 0) for i in range(4)]
+    sim_duration = cfg['simulation']['duration']
+    warmup = cfg['simulation']['warmup']
+    times_q = [i * (sim_duration - 2 * prerun) // 5 + (prerun if i > 0 else 0) for i in range(4)]
 
-    time_stim, q_stc_hist = simulate_with_trajectory(EI_Network, nest, q_stc_initial=q_stc,
-                                              warmup=params['warmup'], simtime=params['simtime'],
-                                              trajectory=(times_q, values_q),
-                                              return_as="tuple_of_lists")
+    time_stim, q_stc_hist = simulate_with_trajectory(
+        EI_Network,
+        nest,
+        q_stc_initial=q_stc,
+        warmup=warmup,
+        simtime=sim_duration,
+        trajectory=(times_q, values_q),
+        return_as="tuple_of_lists",
+    )
 
     # save data
 
@@ -196,27 +219,28 @@ if __name__ == '__main__':
 
     # ----- config -----
     BIN_MS = 5
-    E_PER_CLUST = N_E // params["Q"]
+    Q = cfg['network']['clusters']['count']
+    E_PER_CLUST = N_E // Q
 
     # ----- inputs (from your env) -----
     spike_times_ms = np.array(spiketimes[0])[exc_mask]  # excitatory-only times
     spike_neuron_ids = np.array(spiketimes[1])[exc_mask]  # excitatory-only ids
 
     # ----- time axis (bin centers) -----
-    T = float(params.get('simtime', (spike_times_ms.max() if spike_times_ms.size else 0)))
+    T = float(sim_duration)
     nbins = int(np.ceil(T / BIN_MS))
     edges = np.arange(nbins + 1) * BIN_MS
     t_ms = (edges[:-1] + edges[1:]) / 2.0
 
     # ----- bin spikes per excitatory cluster -----
-    counts = np.zeros((nbins, params["Q"]), dtype=np.int32)
+    counts = np.zeros((nbins, Q), dtype=np.int32)
     if spike_times_ms.size:
         bin_idx = np.clip((spike_times_ms // BIN_MS).astype(int), 0, nbins - 1)
         clus = (spike_neuron_ids // E_PER_CLUST).astype(int)
         np.add.at(counts, (bin_idx, clus), 1)
 
     bin_s = BIN_MS / 1000.0
-    rates_hz = counts / (bin_s * E_PER_CLUST)  # [nbins, params["Q"]]
+    rates_hz = counts / (bin_s * E_PER_CLUST)  # [nbins, Q]
     dom = np.argmax(rates_hz, axis=1)  # dominant cluster per bin
 
     # ----- adaptation per bin from time_stim/q_stc_hist -----
@@ -232,7 +256,6 @@ if __name__ == '__main__':
         pickle.dump(EI_Network.get_parameter(), outfile)
         pickle.dump({"adapt": adapt_q, "time": t_ms, "label": dom}, outfile)
         pickle.dump({'gitHash': gitHash, 'JobID': JobID, 'ArrayID': ArrayID}, outfile)
-
 
 
 
