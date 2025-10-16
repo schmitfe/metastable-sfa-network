@@ -41,8 +41,8 @@ neuron:
     excitatory: 15.0
     inhibitory: 15.0
   I_e:
-    excitatory: 1.0
-    inhibitory: 2.0
+    excitatory: NaN
+    inhibitory: NaN
   I_th:
     excitatory: 1.25
     inhibitory: 0.78

@@ -1,3 +1,5 @@
+import math
+
 import nest
 import numpy as np
 
@@ -46,6 +48,16 @@ class ClusteredNetworkNEST:
             return next(iter(value.values()), default)
         return value
 
+    def _set_neuron_value(self, key, cell_type, value):
+        neuron_cfg = self.config.setdefault('neuron', {})
+        existing = neuron_cfg.get(key)
+        if isinstance(existing, dict):
+            target = existing
+        else:
+            target = {}
+        target[cell_type] = value
+        neuron_cfg[key] = target
+
     def _neuron_model(self, cell_type):
         model_cfg = self.config.get('neuron', {}).get('model', 'iaf_psc_exp')
         if isinstance(model_cfg, dict):
@@ -58,24 +70,32 @@ class ClusteredNetworkNEST:
 
     def _baseline_current(self, cell_type):
         stim_cfg = self.config.get('stimulation', {})
-        if stim_cfg.get('background', 'DC') != 'DC':
-            return 0.0
+        background_dc = stim_cfg.get('background', 'DC') == 'DC'
 
-        I_th = self._neuron_value('I_th', cell_type, None)
-        base_current = self._neuron_value('I_e', cell_type, 0.0)
-        if I_th is None:
-            return base_current
+        base_current = self._neuron_value('I_e', cell_type, None)
+        if isinstance(base_current, float) and math.isnan(base_current):
+            base_current = None
 
-        tau_m = self._neuron_value('tau_m', cell_type)
-        V_th = self._neuron_value('V_th', cell_type)
-        neuron_cfg = self.config['neuron']
-        E_L = neuron_cfg['E_L']
-        C_m = neuron_cfg['C_m']
+        if base_current is not None:
+            result = float(base_current)
+        else:
+            if not background_dc:
+                result = 0.0
+            else:
+                I_th = self._neuron_value('I_th', cell_type, None)
+                tau_m = self._neuron_value('tau_m', cell_type)
+                V_th = self._neuron_value('V_th', cell_type)
+                neuron_cfg = self.config['neuron']
+                E_L = neuron_cfg['E_L']
+                C_m = neuron_cfg['C_m']
 
-        if tau_m is None or V_th is None:
-            return base_current
+                if None in (I_th, tau_m, V_th):
+                    result = 0.0
+                else:
+                    result = float(I_th) * (float(V_th) - E_L) / float(tau_m) * C_m
 
-        return I_th * (V_th - E_L) / tau_m * C_m
+        self._set_neuron_value('I_e', cell_type, float(result))
+        return result
 
     def _build_neuron_params(self, cell_type, model, baseline_current):
         neuron_cfg = self.config['neuron']
