@@ -1,5 +1,8 @@
-from types import ModuleType
+from __future__ import annotations
+
 import copy
+from types import ModuleType
+from typing import Any, Mapping
 # ********************************************************************************
 #                                    Classes
 # ********************************************************************************
@@ -12,12 +15,17 @@ class TimeoutException(Exception):   # Custom exception class
 # ********************************************************************************
 
 
-def mergeParams(params, defaultValues):
+def mergeParams(params: dict | None, defaultValues: Mapping | ModuleType | None):
     """
-    Updates default Values defined in a module with params-dictionary.
+    Updates default values defined in a module/dict with params-dictionary.
     The returned dictionary contains the parameters used for simulation.
     """
-    return nested_update(moduleVarToDict(defaultValues), params)
+    base = moduleVarToDict(defaultValues)
+    if not params:
+        return base
+    if not isinstance(params, dict):
+        raise TypeError("Parameters must be provided as a dictionary.")
+    return nested_update(base, params)
 
 
 def timeout_handler(signum, frame):
@@ -28,15 +36,24 @@ def timeout_handler(signum, frame):
     raise TimeoutException
 
 
-def moduleVarToDict(module):
+def moduleVarToDict(module: Mapping | ModuleType | None) -> dict[str, Any]:
     """
     Creates dict of explicit variables in module which are not imported modules.
     Key names equal the variable name.
     """
-    ModuleDict = {}
-    if module:
-        ModuleDict = {key: value for key, value in module.__dict__.items() if not (key.startswith('__') or key.startswith('_') or isinstance(value, ModuleType))}
-    return ModuleDict
+    if module is None:
+        return {}
+    if isinstance(module, dict):
+        return copy.deepcopy(module)
+    return {
+        key: value
+        for key, value in module.__dict__.items()
+        if not (
+            key.startswith('__')
+            or key.startswith('_')
+            or isinstance(value, ModuleType)
+        )
+    }
 
 def nested_update(d, d2):
     """
@@ -72,5 +89,4 @@ UnchangedVar=0
 
 defaultTest.py has to be created to test the merger.
 """
-
 

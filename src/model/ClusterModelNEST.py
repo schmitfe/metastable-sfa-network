@@ -2,12 +2,10 @@ import nest
 import numpy as np
 import time
 import pickle
-import sys
 import signal
-sys.path.append("..")
-from Helper import ClusterHelper
-from Helper import GeneralHelper
-from Helper import ClusterModelBase
+
+from .. import GeneralHelper
+from . import ClusterHelper, ClusterModelBase
 
 
 class ClusteredNetworkNEST(ClusterModelBase.ClusteredNetworkBase):
@@ -774,8 +772,10 @@ class ClusteredNetworkNEST_Timing(ClusteredNetworkNEST):
                     {"synapse_model": ConnData[key].synapse_model.values[0], "weight": ConnData[key].weight.values})
 
 if __name__ == "__main__":
-    from Defaults import defaultSimulate as default
+    from config import load_config
     import matplotlib.pyplot as plt
+
+    default = load_config()
 
     EI_cluster = ClusteredNetworkNEST(default, {'n_jobs': 4, 'warmup': 500, 'simtime': 1200, 'stim_clusters': [3],
                                                 'stim_amp': 2.0, 'stim_starts': [600.], 'stim_ends': [1000.]})

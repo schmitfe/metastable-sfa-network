@@ -1,0 +1,98 @@
+constants:
+  eps: 2.220446049250313e-16
+
+network:
+  population:
+    excitatory: 1200
+    inhibitory: 300
+  clusters:
+    count: 6
+    jplus:
+      - [3.2, 2.65]
+      - [2.65, 2.65]
+  connectivity:
+    probabilities:
+      - [0.2, 0.5]
+      - [0.5, 0.5]
+    delay: 0.2
+    fixed_indegree: false
+  weights:
+    matrix:
+      - [NaN, NaN]
+      - [NaN, NaN]
+    scale: 1.0
+    modifiers:
+      ge: 1.2
+      gi: 1.0
+      gie: 1.0
+
+neurons:
+  type: gif_psc_exp
+  rest_potential: 0.0
+  reset_potential: 0.0
+  capacitance: 1.0
+  refractory_period: 5.0
+  membrane_time_constant:
+    excitatory: 20.0
+    inhibitory: 10.0
+  synapse_time_constant:
+    excitatory: 3.0
+    inhibitory: 2.0
+  threshold:
+    excitatory: 15.0
+    inhibitory: 15.0
+  background_current:
+    excitatory: 1.0
+    inhibitory: 2.0
+    delta:
+      excitatory: 0.0
+      inhibitory: 0.0
+  target_current:
+    excitatory: 1.25
+    inhibitory: 0.78
+  initial_membrane_state: rand
+  adaptation:
+    lambda_0: 1000.0
+    Delta_V: 1.0e-41
+    q_sfa: 0.0
+    tau_sfa: 2.0
+    q_stc: 0.12777777777777777
+    tau_stc: 180.0
+  noise:
+    delta: null
+    rho: null
+
+synapse:
+  plasticity:
+    U: 0.2
+    u: 0.0
+    tau_rec: 120.0
+    tau_fac: 0.0
+  distribution:
+    distribution: normal
+    sigma: 0.0
+    fraction: false
+
+simulation:
+  dt: 0.1
+  duration: 1000.0
+  warmup: 0.0
+  return_weights: false
+  n_jobs: 1
+  randseed: null
+
+recording:
+  voltage: false
+  target: all
+  interval: 0.1
+
+stimulation:
+  background: DC
+  amplitude: 0.0
+  clusters: null
+  starts: []
+  ends: []
+  multi:
+    clusters: null
+    times: null
+    amps: null

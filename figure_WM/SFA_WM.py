@@ -12,10 +12,15 @@ from matplotlib import pyplot as plt
 from matplotlib.patches import Rectangle
 
 # --- project imports ---
-sys.path.append("..")
-from Defaults import defaultSimulate as default
-from Helper import ClusterModelNEST
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.append(str(ROOT))
+
+from config import load_config
+from src.model import ClusterModelNEST
 import nest
+
+default = load_config()
 
 
 # =============================================================

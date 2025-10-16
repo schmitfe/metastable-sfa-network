@@ -8,10 +8,15 @@ from pathlib import Path
 
 from matplotlib import pyplot as plt
 
-sys.path.append("..")
-from Defaults import defaultSimulate as default
-from Helper import ClusterModelNEST
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.append(str(ROOT))
+
+from config import load_config
+from src.model import ClusterModelNEST
 import nest
+
+default = load_config()
 
 def simulate_with_trajectory(EI_Network, nest, q_stc_initial, *,
                              warmup: int,
@@ -227,7 +232,6 @@ if __name__ == '__main__':
         pickle.dump(EI_Network.get_parameter(), outfile)
         pickle.dump({"adapt": adapt_q, "time": t_ms, "label": dom}, outfile)
         pickle.dump({'gitHash': gitHash, 'JobID': JobID, 'ArrayID': ArrayID}, outfile)
-
 
 
 
