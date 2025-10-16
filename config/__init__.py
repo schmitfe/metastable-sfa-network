@@ -4,6 +4,8 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any, Iterable
 
+import argparse
+
 try:
     import yaml  # type: ignore
 except ModuleNotFoundError as _yaml_error:  # pragma: no cover - optional dependency
@@ -85,4 +87,66 @@ def _resolve_config_path(name: str) -> Path:
     return CONFIG_DIR / f'{name}.yaml'
 
 
-__all__ = ['load_config', 'parse_overrides', 'deep_update', 'CONFIG_DIR']
+def add_override_arguments(
+    parser: argparse.ArgumentParser,
+    *,
+    config_option: str = "--config",
+    overwrite_option: str = "--overwrite",
+    config_default: str = "default_simulation",
+    overwrite_metavar: str = "path=value",
+) -> None:
+    """
+    Register standard configuration CLI arguments on an argparse parser.
+
+    Parameters
+    ----------
+    parser:
+        Existing ArgumentParser to extend.
+    config_option:
+        Name of the CLI flag for selecting the base config (default: --config).
+    overwrite_option:
+        Name of the CLI flag for overrides (default: --overwrite). A short '-O'
+        alias is also added automatically.
+    config_default:
+        Default config name passed to :func:`load_config` when the flag is omitted.
+    overwrite_metavar:
+        Display name for overwrite arguments in help text.
+    """
+    parser.add_argument(
+        config_option,
+        default=config_default,
+        help="Config name or path (defaults to '%(default)s').",
+    )
+    parser.add_argument(
+        "-O",
+        overwrite_option,
+        action="append",
+        default=[],
+        metavar=overwrite_metavar,
+        help="Override a config value using dotted-path notation (may be repeated).",
+    )
+
+
+def load_from_args(
+    args: argparse.Namespace,
+    *,
+    config_attr: str = "config",
+    overwrite_attr: str = "overwrite",
+    default_config: str = "default_simulation",
+) -> dict[str, Any]:
+    """
+    Convenience wrapper that calls :func:`load_config` using parsed CLI arguments.
+    """
+    config_name = getattr(args, config_attr, default_config) or default_config
+    overrides = getattr(args, overwrite_attr, None)
+    return load_config(config_name, overrides=overrides)
+
+
+__all__ = [
+    'load_config',
+    'parse_overrides',
+    'deep_update',
+    'CONFIG_DIR',
+    'add_override_arguments',
+    'load_from_args',
+]

@@ -4,9 +4,11 @@ network:
     inhibitory: 300
   clusters:
     count: 6
+    jep: 3.2
+    jip_ratio: 0.75
     jplus:
-      - [3.2, 2.65]
-      - [2.65, 2.65]
+      - [NaN, NaN]
+      - [NaN, NaN]
   connectivity:
     probabilities:
       - [0.2, 0.5]

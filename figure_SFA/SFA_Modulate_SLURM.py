@@ -180,7 +180,7 @@ if __name__ == '__main__':
         },
         'network': {
             'population': {'excitatory': N_E, 'inhibitory': N_I},
-            'clusters': {'count': 10, 'jplus': [[float(jep), float(jip)], [float(jip), float(jip)]]},
+            'clusters': {'count': 10, 'jep': float(jep), 'jip_ratio': float(jip_ratio)},
         },
         'neuron': {
             'model': 'gif_psc_exp',
@@ -189,7 +189,6 @@ if __name__ == '__main__':
             'q_stc': float(q_stc),
         },
         'stimulation': {'background': 'DC'},
-        'only_E_SFA': True,
     }
 
     EI_Network = ClusterModelNEST.ClusteredNetworkNEST(default, overrides)
@@ -213,18 +212,19 @@ if __name__ == '__main__':
 
     # save data
 
-    spiketimes=EI_Network.get_recordings()
-    exc_mask = (spiketimes[1] < N_E)
-    inh_mask = (spiketimes[1] >= N_E)
+    spiketimes = EI_Network.get_recordings()
+    n_exc = int(cfg['network']['population']['excitatory'])
+    exc_mask = spiketimes[1] < n_exc
+    inh_mask = spiketimes[1] >= n_exc
 
     # ----- config -----
     BIN_MS = 5
     Q = cfg['network']['clusters']['count']
-    E_PER_CLUST = N_E // Q
+    E_PER_CLUST = n_exc // Q
 
     # ----- inputs (from your env) -----
-    spike_times_ms = np.array(spiketimes[0])[exc_mask]  # excitatory-only times
-    spike_neuron_ids = np.array(spiketimes[1])[exc_mask]  # excitatory-only ids
+    spike_times_ms = np.array(spiketimes[0])[exc_mask]
+    spike_neuron_ids = np.array(spiketimes[1])[exc_mask]
 
     # ----- time axis (bin centers) -----
     T = float(sim_duration)
@@ -256,9 +256,6 @@ if __name__ == '__main__':
         pickle.dump(EI_Network.get_parameter(), outfile)
         pickle.dump({"adapt": adapt_q, "time": t_ms, "label": dom}, outfile)
         pickle.dump({'gitHash': gitHash, 'JobID': JobID, 'ArrayID': ArrayID}, outfile)
-
-
-
 
 
 

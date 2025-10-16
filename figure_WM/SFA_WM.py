@@ -1007,7 +1007,7 @@ if __name__ == "__main__":
         },
         'network': {
             'population': {'excitatory': N_E, 'inhibitory': N_I},
-            'clusters': {'count': 10, 'jplus': [[float(jep), float(jip)], [float(jip), float(jip)]]},
+            'clusters': {'count': 10, 'jep': float(jep), 'jip_ratio': float(jip_ratio)},
         },
         'neuron': {
             'model': 'gif_psc_exp',
@@ -1016,13 +1016,14 @@ if __name__ == "__main__":
             'q_stc': float(q_stc),
         },
         'stimulation': {'background': 'DC'},
-        'only_E_SFA': True,
     }
 
     # ------------------- RUN MIXED (ATTN + CTRL + CTRL_PRE) -------------------
     EI = ClusterModelNEST.ClusteredNetworkNEST(default, overrides)
     EI.setup_network()
     cfg = EI.get_parameter()
+    N_E = int(cfg['network']['population']['excitatory'])
+    N_I = int(cfg['network']['population']['inhibitory'])
     Q = cfg['network']['clusters']['count']
 
     rng = np.random.default_rng(randseed)
